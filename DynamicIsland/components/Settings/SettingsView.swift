@@ -8653,6 +8653,8 @@ struct ScreenAssistantSettings: View {
     @Default(.enableScreenAssistant) var enableScreenAssistant
     @Default(.screenAssistantDisplayMode) var screenAssistantDisplayMode
     @Default(.geminiApiKey) var geminiApiKey
+    @Default(.selectedAIProvider) var selectedAIProvider
+    @Default(.customAPIName) var customAPIName
     @State private var apiKeyText = ""
     @State private var showingApiKey = false
 
@@ -8675,6 +8677,23 @@ struct ScreenAssistantSettings: View {
 
             if enableScreenAssistant {
                 Section {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("AI Provider")
+                            Text(selectedAIProvider == .custom ? customAPIName : selectedAIProvider.displayName)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("Configure Models & APIs") {
+                            let panel = ModelSelectionPanel()
+                            panel.positionInCenter()
+                            panel.makeKeyAndOrderFront(nil)
+                            panel.orderFrontRegardless()
+                            NSApp.activate(ignoringOtherApps: true)
+                        }
+                    }
+
                     HStack {
                         Text("Gemini API Key")
                         Spacer()

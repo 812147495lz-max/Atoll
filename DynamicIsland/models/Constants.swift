@@ -794,6 +794,7 @@ enum AIModelProvider: String, CaseIterable, Identifiable, Defaults.Serializable 
     case claude = "Claude"
     case local = "Local Model"
     case groq = "Groq"
+    case custom = "Custom API"
     
     var id: String { self.rawValue }
     
@@ -808,6 +809,7 @@ enum AIModelProvider: String, CaseIterable, Identifiable, Defaults.Serializable 
         case .claude: return String(localized: "Anthropic's Claude with strong analytical skills")
         case .local: return String(localized: "Local AI model (Ollama or similar)")
         case .groq: return String(localized: "Groq's fast inference for OpenAI-compatible models")
+        case .custom: return String(localized: "Use any compatible API endpoint and model")
         }
     }
     
@@ -855,8 +857,28 @@ enum AIModelProvider: String, CaseIterable, Identifiable, Defaults.Serializable 
                 AIModel(id: "qwen-qwq-32b", name: "Qwen QWQ 32B", supportsThinking: false),
                 AIModel(id: "mixtral-8x7b-32768", name: "Mixtral 8x7B", supportsThinking: false)
             ]
+        case .custom:
+            return []
         }
     }
+}
+
+enum CustomAPIFormat: String, CaseIterable, Identifiable, Defaults.Serializable {
+    case openAI = "OpenAI Chat Completions"
+    case anthropic = "Anthropic Messages"
+    case gemini = "Gemini generateContent"
+    case ollama = "Ollama Chat"
+
+    var id: String { rawValue }
+}
+
+enum CustomAPIAuthentication: String, CaseIterable, Identifiable, Defaults.Serializable {
+    case bearer = "Bearer token"
+    case header = "API key header"
+    case query = "Query parameter"
+    case none = "No authentication"
+
+    var id: String { rawValue }
 }
 
 struct AIModel: Codable, Identifiable, Defaults.Serializable {
@@ -1376,6 +1398,15 @@ extension Defaults.Keys {
     static let selectedAIModel = Key<AIModel?>("selectedAIModel", default: nil)
     static let enableThinkingMode = Key<Bool>("enableThinkingMode", default: false)
     static let localModelEndpoint = Key<String>("localModelEndpoint", default: "http://localhost:11434")
+    static let customAPIName = Key<String>("customAPIName", default: "Custom API")
+    static let customAPIFormat = Key<CustomAPIFormat>("customAPIFormat", default: .openAI)
+    static let customAPIEndpoint = Key<String>("customAPIEndpoint", default: "https://api.deepseek.com/v1/chat/completions")
+    static let customAPIModel = Key<String>("customAPIModel", default: "deepseek-flash")
+    static let customAPIKey = Key<String>("customAPIKey", default: "")
+    static let customAPIAuthentication = Key<CustomAPIAuthentication>("customAPIAuthentication", default: .bearer)
+    static let customAPIAuthName = Key<String>("customAPIAuthName", default: "Authorization")
+    static let customAPIAuthPrefix = Key<String>("customAPIAuthPrefix", default: "Bearer ")
+    static let customAPIAdditionalHeaders = Key<String>("customAPIAdditionalHeaders", default: "")
 
     // MARK: Third-Party Extensions
     static let enableThirdPartyExtensions = Key<Bool>("enableThirdPartyExtensions", default: true)

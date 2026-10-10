@@ -337,7 +337,7 @@ struct ChatInputView: View {
                         .font(.caption)
                         .foregroundColor(.blue)
                     
-                    Text(currentModel?.name ?? currentProvider.displayName)
+                    Text(currentProvider == .custom ? customProviderLabel : (currentModel?.name ?? currentProvider.displayName))
                         .font(.caption)
                         .foregroundColor(.secondary)
                     
@@ -451,7 +451,14 @@ struct ChatInputView: View {
         case .claude: return "doc.text"
         case .local: return "server.rack"
         case .groq: return "bolt.fill"
+        case .custom: return "slider.horizontal.3"
         }
+    }
+
+    private var customProviderLabel: String {
+        let name = Defaults[.customAPIName].trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = Defaults[.customAPIModel].trimmingCharacters(in: .whitespacesAndNewlines)
+        return [name.isEmpty ? "Custom API" : name, model].filter { !$0.isEmpty }.joined(separator: " · ")
     }
     
     private var canSend: Bool {
@@ -475,6 +482,8 @@ struct ChatInputView: View {
             apiKey = "local"
         case .groq:
             apiKey = Defaults[.groqApiKey]
+        case .custom:
+            apiKey = Defaults[.customAPIAuthentication] == .none ? "no-auth" : Defaults[.customAPIKey]
         }
         
         if apiKey.isEmpty {

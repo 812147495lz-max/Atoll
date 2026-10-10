@@ -399,6 +399,8 @@ class ScreenAssistantManager: NSObject, ObservableObject {
             sendToLocalAPI(message: message, files: files)
         case .groq:
             sendToGroqAPI(message: message, files: files)
+        case .custom:
+            sendToCustomAPI(message: message, files: files)
         }
     }
     
@@ -522,6 +524,25 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         }
         
         performAPIRequest(url: url, requestBody: buildOllamaRequestBody(message: message, files: files), provider: .local)
+    }
+
+    private func sendToCustomAPI(message: String, files: [ScreenAssistantFile]) {
+        let configuration = CustomAPIConfiguration.current
+
+        do {
+            let url = try configuration.resolvedURL()
+            let headers = try configuration.requestHeaders()
+            let requestBody = buildCustomAPIRequestBody(
+                message: message,
+                files: files,
+                configuration: configuration
+            )
+            performCustomAPIRequest(url: url, requestBody: requestBody, headers: headers)
+        } catch {
+            print("❌ ScreenAssistant: Invalid custom API configuration - \(error)")
+            addAssistantMessage("Error: \(error.localizedDescription)")
+            isLoading = false
+        }
     }
     
     // MARK: - API Request Builders
@@ -678,6 +699,132 @@ class ScreenAssistantManager: NSObject, ObservableObject {
             "stream": false
         ]
     }
+
+    private func buildCustomAPIRequestBody(
+        message: String,
+        files: [ScreenAssistantFile],
+        configuration: CustomAPIConfiguration
+    ) -> [String: Any] {
+        switch configuration.format {
+        case .openAI:
+            return buildCustomOpenAIRequestBody(message: message, files: files, model: configuration.model)
+        case .anthropic:
+            return buildCustomAnthropicRequestBody(message: message, files: files, model: configuration.model)
+        case .gemini:
+            return buildGeminiRequestBody(message: message, files: files)
+        case .ollama:
+            return buildCustomOllamaRequestBody(message: message, files: files, model: configuration.model)
+        }
+    }
+
+    private func buildCustomOpenAIRequestBody(message: String, files: [ScreenAssistantFile], model: String) -> [String: Any] {
+        var messages = customConversationHistory(assistantRole: "assistant")
+        let textContent = buildContextualMessage(message: message, files: files) + customTextFileContents(files)
+        var content: [[String: Any]] = [[
+            "type": "text",
+            "text": textContent
+        ]]
+
+        for file in files where file.type == .image {
+            guard let image = customImageData(for: file) else { continue }
+            content.append([
+                "type": "image_url",
+                "image_url": ["url": "data:\(image.mimeType);base64,\(image.base64)"]
+            ])
+        }
+        if content.count == 1 {
+            messages.append(["role": "user", "content": textContent])
+        } else {
+            messages.append(["role": "user", "content": content])
+        }
+
+        return [
+            "model": model,
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 2048
+        ]
+    }
+
+    private func buildCustomAnthropicRequestBody(message: String, files: [ScreenAssistantFile], model: String) -> [String: Any] {
+        var messages = customConversationHistory(assistantRole: "assistant")
+        var content: [[String: Any]] = [[
+            "type": "text",
+            "text": buildContextualMessage(message: message, files: files) + customTextFileContents(files)
+        ]]
+
+        for file in files where file.type == .image {
+            guard let image = customImageData(for: file) else { continue }
+            content.append([
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": image.mimeType,
+                    "data": image.base64
+                ]
+            ])
+        }
+        messages.append(["role": "user", "content": content])
+
+        return [
+            "model": model,
+            "max_tokens": 2048,
+            "messages": messages
+        ]
+    }
+
+    private func buildCustomOllamaRequestBody(message: String, files: [ScreenAssistantFile], model: String) -> [String: Any] {
+        var userMessage: [String: Any] = [
+            "role": "user",
+            "content": buildContextualMessage(message: message, files: files) + customTextFileContents(files)
+        ]
+        let images = files.compactMap { customImageData(for: $0)?.base64 }
+        if !images.isEmpty {
+            userMessage["images"] = images
+        }
+
+        var messages = customConversationHistory(assistantRole: "assistant")
+        messages.append(userMessage)
+        return ["model": model, "messages": messages, "stream": false]
+    }
+
+    private func customConversationHistory(assistantRole: String) -> [[String: Any]] {
+        Array(chatMessages.suffix(10)).compactMap { chatMessage in
+            guard chatMessage.id != chatMessages.last?.id else { return nil }
+            return [
+                "role": chatMessage.isFromUser ? "user" : assistantRole,
+                "content": chatMessage.content
+            ]
+        }
+    }
+
+    private func customTextFileContents(_ files: [ScreenAssistantFile]) -> String {
+        var result = ""
+        for file in files where file.type == .document || file.type == .other {
+            guard let fileURL = file.fileURL,
+                  let url = URL(string: fileURL),
+                  let contents = try? String(contentsOf: url) else { continue }
+            result += "\n\nContents of \(file.name):\n\(contents)"
+        }
+        return result
+    }
+
+    private func customImageData(for file: ScreenAssistantFile) -> (mimeType: String, base64: String)? {
+        guard file.type == .image,
+              let fileURL = file.fileURL,
+              let url = URL(string: fileURL),
+              let data = try? Data(contentsOf: url) else { return nil }
+
+        let mimeType: String
+        switch url.pathExtension.lowercased() {
+        case "png": mimeType = "image/png"
+        case "gif": mimeType = "image/gif"
+        case "webp": mimeType = "image/webp"
+        case "heic": mimeType = "image/heic"
+        default: mimeType = "image/jpeg"
+        }
+        return (mimeType, data.base64EncodedString())
+    }
     
     // MARK: - API Request Performers
     
@@ -790,6 +937,36 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         activeRequest = task
         task?.resume()
     }
+
+    private func performCustomAPIRequest(url: URL, requestBody: [String: Any], headers: [String: String]) {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+        } catch {
+            print("❌ ScreenAssistant: Failed to encode custom API request - \(error)")
+            addAssistantMessage("Error: Failed to encode request - \(error.localizedDescription)")
+            isLoading = false
+            return
+        }
+
+        var task: URLSessionDataTask?
+        task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self, let currentTask = task, self.activeRequest === currentTask else { return }
+                self.isLoading = false
+                self.activeRequest = nil
+                self.handleResponse(data: data, response: response, error: error, provider: .custom)
+            }
+        }
+
+        activeRequest = task
+        task?.resume()
+    }
     
     // MARK: - Response Handlers
     
@@ -808,8 +985,12 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         
         if let httpResponse = response as? HTTPURLResponse {
             print("📊 ScreenAssistant: HTTP Status: \(httpResponse.statusCode)")
-            if httpResponse.statusCode != 200 {
-                handleAPIError(statusCode: httpResponse.statusCode, provider: provider)
+            if !(200..<300).contains(httpResponse.statusCode) {
+                if provider == .custom, let data {
+                    handleCustomAPIError(statusCode: httpResponse.statusCode, data: data)
+                } else {
+                    handleAPIError(statusCode: httpResponse.statusCode, provider: provider)
+                }
                 return
             }
         }
@@ -831,6 +1012,21 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         case .claude:
             parseClaudeResponse(data: data)
         case .local:
+            parseOllamaResponse(data: data)
+        case .custom:
+            parseCustomAPIResponse(data: data, format: Defaults[.customAPIFormat])
+        }
+    }
+
+    private func parseCustomAPIResponse(data: Data, format: CustomAPIFormat) {
+        switch format {
+        case .openAI:
+            parseOpenAIResponse(data: data)
+        case .anthropic:
+            parseClaudeResponse(data: data)
+        case .gemini:
+            parseGeminiResponse(data: data)
+        case .ollama:
             parseOllamaResponse(data: data)
         }
     }
@@ -1214,6 +1410,25 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         }
         
         addAssistantMessage(userFriendlyMessage)
+    }
+
+    private func handleCustomAPIError(statusCode: Int, data: Data) {
+        var detail: String?
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let error = json["error"] as? [String: Any] {
+                detail = error["message"] as? String
+            } else if let error = json["error"] as? String {
+                detail = error
+            } else {
+                detail = (json["message"] as? String) ?? (json["detail"] as? String)
+            }
+        }
+        if detail == nil {
+            detail = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let message = detail.flatMap { $0.isEmpty ? nil : $0 } ?? "The server did not include an error message."
+        addAssistantMessage("❌ **Custom API Error (\(statusCode))**\n\n\(message)")
     }
     
     private func handleAPIError(error: [String: Any]) {

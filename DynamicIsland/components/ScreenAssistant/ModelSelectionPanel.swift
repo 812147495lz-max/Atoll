@@ -128,6 +128,15 @@ struct ModelSelectionView: View {
     @State private var claudeApiKey: String = Defaults[.claudeApiKey]
     @State private var localEndpoint: String = Defaults[.localModelEndpoint]
     @State private var groqApiKey: String = Defaults[.groqApiKey]
+    @State private var customAPIName: String = Defaults[.customAPIName]
+    @State private var customAPIFormat: CustomAPIFormat = Defaults[.customAPIFormat]
+    @State private var customAPIEndpoint: String = Defaults[.customAPIEndpoint]
+    @State private var customAPIModel: String = Defaults[.customAPIModel]
+    @State private var customAPIKey: String = Defaults[.customAPIKey]
+    @State private var customAPIAuthentication: CustomAPIAuthentication = Defaults[.customAPIAuthentication]
+    @State private var customAPIAuthName: String = Defaults[.customAPIAuthName]
+    @State private var customAPIAuthPrefix: String = Defaults[.customAPIAuthPrefix]
+    @State private var customAPIAdditionalHeaders: String = Defaults[.customAPIAdditionalHeaders]
     
     @State private var showingApiKeyAlert = false
     
@@ -185,6 +194,13 @@ struct ModelSelectionView: View {
                             provider: .groq,
                             isSelected: selectedProvider == .groq,
                             onSelect: { selectProvider(.groq) },
+                            isWide: true
+                        )
+
+                        ProviderCard(
+                            provider: .custom,
+                            isSelected: selectedProvider == .custom,
+                            onSelect: { selectProvider(.custom) },
                             isWide: true
                         )
                     }
@@ -255,7 +271,16 @@ struct ModelSelectionView: View {
                             openaiApiKey: $openaiApiKey,
                             claudeApiKey: $claudeApiKey,
                             localEndpoint: $localEndpoint,
-                            groqApiKey: $groqApiKey
+                            groqApiKey: $groqApiKey,
+                            customAPIName: $customAPIName,
+                            customAPIFormat: $customAPIFormat,
+                            customAPIEndpoint: $customAPIEndpoint,
+                            customAPIModel: $customAPIModel,
+                            customAPIKey: $customAPIKey,
+                            customAPIAuthentication: $customAPIAuthentication,
+                            customAPIAuthName: $customAPIAuthName,
+                            customAPIAuthPrefix: $customAPIAuthPrefix,
+                            customAPIAdditionalHeaders: $customAPIAdditionalHeaders
                         )
                     }
                 }
@@ -303,6 +328,13 @@ struct ModelSelectionView: View {
             return !localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case .groq:
             return !groqApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .custom:
+            let hasEndpointAndModel = !customAPIEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !customAPIModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let hasAuthentication = customAPIAuthentication == .none
+                || (!customAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && !customAPIAuthName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            return hasEndpointAndModel && hasAuthentication
         }
     }
     
@@ -317,6 +349,15 @@ struct ModelSelectionView: View {
         claudeApiKey = Defaults[.claudeApiKey]
         localEndpoint = Defaults[.localModelEndpoint]
         groqApiKey = Defaults[.groqApiKey]
+        customAPIName = Defaults[.customAPIName]
+        customAPIFormat = Defaults[.customAPIFormat]
+        customAPIEndpoint = Defaults[.customAPIEndpoint]
+        customAPIModel = Defaults[.customAPIModel]
+        customAPIKey = Defaults[.customAPIKey]
+        customAPIAuthentication = Defaults[.customAPIAuthentication]
+        customAPIAuthName = Defaults[.customAPIAuthName]
+        customAPIAuthPrefix = Defaults[.customAPIAuthPrefix]
+        customAPIAdditionalHeaders = Defaults[.customAPIAdditionalHeaders]
     }
     
     private func saveConfiguration() {
@@ -331,6 +372,15 @@ struct ModelSelectionView: View {
         Defaults[.claudeApiKey] = claudeApiKey
         Defaults[.localModelEndpoint] = localEndpoint
         Defaults[.groqApiKey] = groqApiKey
+        Defaults[.customAPIName] = customAPIName
+        Defaults[.customAPIFormat] = customAPIFormat
+        Defaults[.customAPIEndpoint] = customAPIEndpoint
+        Defaults[.customAPIModel] = customAPIModel
+        Defaults[.customAPIKey] = customAPIKey
+        Defaults[.customAPIAuthentication] = customAPIAuthentication
+        Defaults[.customAPIAuthName] = customAPIAuthName
+        Defaults[.customAPIAuthPrefix] = customAPIAuthPrefix
+        Defaults[.customAPIAdditionalHeaders] = customAPIAdditionalHeaders
         
         closePanel()
         
@@ -413,6 +463,7 @@ struct ProviderCard: View {
         case .claude: return "doc.text"
         case .local: return "server.rack"
         case .groq: return "bolt.fill"
+        case .custom: return "slider.horizontal.3"
         }
     }
 }
@@ -473,6 +524,15 @@ struct ApiConfigurationSection: View {
     @Binding var claudeApiKey: String
     @Binding var localEndpoint: String
     @Binding var groqApiKey: String
+    @Binding var customAPIName: String
+    @Binding var customAPIFormat: CustomAPIFormat
+    @Binding var customAPIEndpoint: String
+    @Binding var customAPIModel: String
+    @Binding var customAPIKey: String
+    @Binding var customAPIAuthentication: CustomAPIAuthentication
+    @Binding var customAPIAuthName: String
+    @Binding var customAPIAuthPrefix: String
+    @Binding var customAPIAdditionalHeaders: String
     
     var body: some View {
         VStack(spacing: 12) {
@@ -516,11 +576,153 @@ struct ApiConfigurationSection: View {
                     value: $groqApiKey,
                     helpText: "Get your API key from Groq Console"
                 )
+            case .custom:
+                CustomAPIConfigurationSection(
+                    name: $customAPIName,
+                    format: $customAPIFormat,
+                    endpoint: $customAPIEndpoint,
+                    model: $customAPIModel,
+                    apiKey: $customAPIKey,
+                    authentication: $customAPIAuthentication,
+                    authName: $customAPIAuthName,
+                    authPrefix: $customAPIAuthPrefix,
+                    additionalHeaders: $customAPIAdditionalHeaders
+                )
             }
         }
         .padding(16)
         .background(Color.gray.opacity(0.05))
         .cornerRadius(12)
+    }
+}
+
+struct CustomAPIConfigurationSection: View {
+    @Binding var name: String
+    @Binding var format: CustomAPIFormat
+    @Binding var endpoint: String
+    @Binding var model: String
+    @Binding var apiKey: String
+    @Binding var authentication: CustomAPIAuthentication
+    @Binding var authName: String
+    @Binding var authPrefix: String
+    @Binding var additionalHeaders: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ApiKeyField(
+                title: "Display Name",
+                placeholder: "DeepSeek, OpenRouter, Company Gateway…",
+                value: $name,
+                helpText: "Shown in the screen assistant",
+                isSecure: false
+            )
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("API Format")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                Picker("API Format", selection: $format) {
+                    ForEach(CustomAPIFormat.allCases) { item in
+                        Text(item.rawValue).tag(item)
+                    }
+                }
+                .labelsHidden()
+                .onChange(of: format) { newFormat in
+                    applyAuthenticationDefaults(for: newFormat)
+                }
+            }
+
+            ApiKeyField(
+                title: "Endpoint URL",
+                placeholder: "https://api.example.com/v1/chat/completions",
+                value: $endpoint,
+                helpText: "Use {model} in the URL when the protocol requires it",
+                isSecure: false
+            )
+
+            ApiKeyField(
+                title: "Model",
+                placeholder: "deepseek-flash",
+                value: $model,
+                helpText: "The exact model ID accepted by the API",
+                isSecure: false
+            )
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Authentication")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                Picker("Authentication", selection: $authentication) {
+                    ForEach(CustomAPIAuthentication.allCases) { item in
+                        Text(item.rawValue).tag(item)
+                    }
+                }
+                .labelsHidden()
+            }
+
+            if authentication != .none {
+                ApiKeyField(
+                    title: "API Key",
+                    placeholder: "Enter API key",
+                    value: $apiKey,
+                    helpText: "Used only with this custom provider"
+                )
+
+                ApiKeyField(
+                    title: authentication == .query ? "Query Parameter" : "Header Name",
+                    placeholder: authentication == .query ? "key" : "Authorization",
+                    value: $authName,
+                    helpText: authentication == .query ? "For example: key or api_key" : "For example: Authorization or x-api-key",
+                    isSecure: false
+                )
+            }
+
+            if authentication == .bearer || authentication == .header {
+                ApiKeyField(
+                    title: "Value Prefix",
+                    placeholder: "Bearer ",
+                    value: $authPrefix,
+                    helpText: "Prepended to the API key; leave empty for x-api-key",
+                    isSecure: false
+                )
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Additional Headers")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                TextEditor(text: $additionalHeaders)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(minHeight: 70)
+                    .padding(6)
+                    .background(Color.gray.opacity(0.1))
+                    .cornerRadius(6)
+                Text("Optional, one per line: Header-Name: value")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func applyAuthenticationDefaults(for format: CustomAPIFormat) {
+        switch format {
+        case .openAI:
+            authentication = .bearer
+            authName = "Authorization"
+            authPrefix = "Bearer "
+        case .anthropic:
+            authentication = .header
+            authName = "x-api-key"
+            authPrefix = ""
+        case .gemini:
+            authentication = .query
+            authName = "key"
+            authPrefix = ""
+        case .ollama:
+            authentication = .none
+            authName = ""
+            authPrefix = ""
+        }
     }
 }
 
