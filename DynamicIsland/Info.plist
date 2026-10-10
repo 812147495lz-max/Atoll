@@ -10,9 +10,15 @@
 	<key>NSAppleMusicUsageDescription</key>
 	<string>Atoll uses Apple Music to fetch animated artwork for the lock screen wallpaper.</string>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>Atoll needs audio capture permission to show the real-time music waveform and to set the volume of individual apps. Audio is only processed live and is never recorded or saved.</string>
+	<string>Atoll captures system audio only when you start audio transcription in the AI assistant, and also uses live audio for music visualization and per-app volume. Assistant audio is transcribed and is not stored by Atoll.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Atoll uses the camera only when you request a snapshot for the AI assistant.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Atoll uses the microphone only when you start dictation for the AI assistant.</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>Atoll needs screen recording permission to capture screenshots for the AI assistant feature.</string>
+	<string>Atoll needs screen recording permission when you capture screenshots or transcribe system audio for the AI assistant.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Atoll converts microphone or system audio speech into text for the AI assistant when you request it.</string>
 	<key>SUEnableDownloaderService</key>
 	<true/>
 	<key>SUEnableInstallerLauncherService</key>

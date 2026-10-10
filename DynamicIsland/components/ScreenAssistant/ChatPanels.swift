@@ -406,8 +406,8 @@ struct ChatInputView: View {
                 .buttonStyle(PlainButtonStyle())
                 .help("Choose AI model")
                 
-                // Recording button
-                RecordingButton()
+                // Camera, microphone, and system-audio context
+                MultimediaInputButton(messageText: $messageText)
                 
                 // Send button
                 Button(action: sendMessage) {
@@ -614,6 +614,169 @@ struct StreamingChatMessageBubble: View {
 
 // MARK: - Note: Shared Components (MarkdownText, AttachedFileChip, AddFilesButton, RecordingButton, ApiKeyAlertView) 
 // are defined in ScreenAssistantPanel.swift to avoid redeclaration conflicts.
+
+// MARK: - Multimedia Input Button
+struct MultimediaInputButton: View {
+    @Binding var messageText: String
+    @ObservedObject private var mediaCapture = ScreenAssistantMediaCaptureManager.shared
+    @ObservedObject private var screenshotTool = ScreenshotSnippingTool.shared
+    @State private var showingOptions = false
+    @State private var textBeforeTranscription = ""
+
+    var body: some View {
+        Button(action: { showingOptions.toggle() }) {
+            Image(systemName: iconName)
+                .foregroundColor(iconColor)
+                .font(.system(size: 20))
+                .symbolEffect(.pulse, isActive: mediaCapture.isTranscribing || mediaCapture.isCapturingCamera)
+        }
+        .buttonStyle(PlainButtonStyle())
+        .help("Add camera, microphone, or system audio context")
+        .popover(isPresented: $showingOptions) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Multimedia Context")
+                    .font(.headline)
+
+                Text("Nothing is captured until you choose a source.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                MultimediaOptionButton(
+                    icon: "display",
+                    title: "Full Screen Snapshot",
+                    description: "Attach the current display as an image",
+                    isActive: screenshotTool.isSnipping
+                ) {
+                    screenshotTool.startFullScreenshot { screenshotURL in
+                        ScreenAssistantManager.shared.addFiles([screenshotURL])
+                    }
+                }
+
+                MultimediaOptionButton(
+                    icon: "camera.fill",
+                    title: "Camera Snapshot",
+                    description: "Attach one photo from the camera",
+                    isActive: mediaCapture.isCapturingCamera
+                ) {
+                    mediaCapture.captureCameraSnapshot()
+                }
+
+                MultimediaOptionButton(
+                    icon: mediaCapture.activeAudioSource == .microphone && mediaCapture.isTranscribing
+                        ? "stop.circle.fill"
+                        : "mic.fill",
+                    title: mediaCapture.activeAudioSource == .microphone && mediaCapture.isTranscribing
+                        ? "Stop Microphone Dictation"
+                        : "Microphone Dictation",
+                    description: "Convert your voice into the message",
+                    isActive: mediaCapture.activeAudioSource == .microphone && mediaCapture.isTranscribing
+                ) {
+                    beginOrStopTranscription(.microphone)
+                }
+
+                MultimediaOptionButton(
+                    icon: mediaCapture.activeAudioSource == .systemAudio && mediaCapture.isTranscribing
+                        ? "stop.circle.fill"
+                        : "speaker.wave.2.fill",
+                    title: mediaCapture.activeAudioSource == .systemAudio && mediaCapture.isTranscribing
+                        ? "Stop System Audio"
+                        : "Transcribe System Audio",
+                    description: "Convert spoken computer audio into text",
+                    isActive: mediaCapture.activeAudioSource == .systemAudio && mediaCapture.isTranscribing
+                ) {
+                    beginOrStopTranscription(.systemAudio)
+                }
+
+                if let status = mediaCapture.statusMessage {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundColor(mediaCapture.statusIsError ? .red : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(14)
+            .frame(width: 290)
+        }
+        .onChange(of: mediaCapture.transcript) { newTranscript in
+            let base = textBeforeTranscription.trimmingCharacters(in: .whitespacesAndNewlines)
+            let transcript = newTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+            messageText = [base, transcript]
+                .filter { !$0.isEmpty }
+                .joined(separator: base.isEmpty ? "" : "\n")
+        }
+        .onDisappear {
+            if mediaCapture.isTranscribing {
+                mediaCapture.stopTranscription()
+            }
+        }
+    }
+
+    private var iconName: String {
+        if mediaCapture.isCapturingCamera {
+            return "camera.fill"
+        }
+        switch mediaCapture.activeAudioSource {
+        case .microphone where mediaCapture.isTranscribing:
+            return "mic.fill"
+        case .systemAudio where mediaCapture.isTranscribing:
+            return "speaker.wave.2.fill"
+        default:
+            return "waveform.circle.fill"
+        }
+    }
+
+    private var iconColor: Color {
+        if mediaCapture.isTranscribing {
+            return .red
+        }
+        if mediaCapture.isCapturingCamera {
+            return .orange
+        }
+        return .blue
+    }
+
+    private func beginOrStopTranscription(_ source: ScreenAssistantAudioSource) {
+        if mediaCapture.isTranscribing, mediaCapture.activeAudioSource == source {
+            mediaCapture.stopTranscription()
+        } else {
+            textBeforeTranscription = messageText
+            mediaCapture.toggleTranscription(source: source)
+        }
+    }
+}
+
+private struct MultimediaOptionButton: View {
+    let icon: String
+    let title: String
+    let description: String
+    let isActive: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .foregroundColor(isActive ? .red : .blue)
+                    .frame(width: 24)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .medium))
+                    Text(description)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PlainButtonStyle())
+        .padding(8)
+        .background(Color.gray.opacity(isActive ? 0.16 : 0.08))
+        .cornerRadius(8)
+    }
+}
 
 // MARK: - Screenshot Button Component
 struct ScreenshotButton: View {
