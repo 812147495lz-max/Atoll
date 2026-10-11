@@ -273,7 +273,7 @@ struct ChatMessagesView: View {
                                 HStack(spacing: 12) {
                                     ProgressView()
                                         .scaleEffect(0.8)
-                                    Text("AI is thinking...")
+                                    Text(screenAssistantManager.activeToolStatus ?? "AI is thinking...")
                                         .font(.body)
                                         .foregroundColor(.secondary)
                                     Spacer()
@@ -647,8 +647,10 @@ struct MultimediaInputButton: View {
                     description: "Attach the current display as an image",
                     isActive: screenshotTool.isSnipping
                 ) {
-                    screenshotTool.startFullScreenshot { screenshotURL in
-                        ScreenAssistantManager.shared.addFiles([screenshotURL])
+                    screenshotTool.startFullScreenshot { result in
+                        if case .success(let screenshotURL) = result {
+                            ScreenAssistantManager.shared.addFiles([screenshotURL])
+                        }
                     }
                 }
 
@@ -697,7 +699,7 @@ struct MultimediaInputButton: View {
             .padding(14)
             .frame(width: 290)
         }
-        .onChange(of: mediaCapture.transcript) { newTranscript in
+        .onChange(of: mediaCapture.transcript) { _, newTranscript in
             let base = textBeforeTranscription.trimmingCharacters(in: .whitespacesAndNewlines)
             let transcript = newTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
             messageText = [base, transcript]
@@ -839,12 +841,13 @@ struct ScreenshotButton: View {
     
     private func startScreenshot(type: ScreenshotSnippingTool.ScreenshotType) {
         // Start snipping with direct callback (ScreenshotApp-based approach)
-        screenshotTool.startSnipping(type: type) { [weak screenAssistantManager] screenshotURL in
+        screenshotTool.startSnipping(type: type) { [weak screenAssistantManager] result in
             guard let manager = screenAssistantManager else {
                 print("❌ ScreenshotTool: ScreenAssistantManager deallocated during callback")
                 return
             }
-            
+
+            guard case .success(let screenshotURL) = result else { return }
             print("📁 ScreenshotTool: Adding \(type.displayName.lowercased()) screenshot to chat: \(screenshotURL.lastPathComponent)")
             manager.addFiles([screenshotURL])
             print("📸 \(type.displayName) screenshot captured and added to chat successfully")

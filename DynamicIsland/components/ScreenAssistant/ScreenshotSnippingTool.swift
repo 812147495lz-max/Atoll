@@ -25,7 +25,7 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
     static let shared = ScreenshotSnippingTool()
     
     @Published var isSnipping = false
-    private var completion: ((URL) -> Void)?
+    private var completion: ((Result<URL, Error>) -> Void)?
     
     // MARK: - Screenshot Types (Based on ScreenshotApp)
     enum ScreenshotType {
@@ -62,6 +62,7 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
     }
     
     enum ScreenshotError: Error {
+        case captureInProgress
         case captureFailed
         case noImageInPasteboard
         case saveFailed
@@ -72,8 +73,11 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
     }
     
     // MARK: - Enhanced API (Based on ScreenshotApp Implementation)
-    func startSnipping(type: ScreenshotType = .area, completion: @escaping (URL) -> Void) {
-        guard !isSnipping else { return }
+    func startSnipping(type: ScreenshotType = .area, completion: @escaping (Result<URL, Error>) -> Void) {
+        guard !isSnipping else {
+            completion(.failure(ScreenshotError.captureInProgress))
+            return
+        }
         
         print("🖼️ ScreenshotTool: Starting \(type.displayName.lowercased()) screenshot using screencapture tool")
         self.completion = completion
@@ -84,16 +88,24 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
     }
     
     // MARK: - Convenience Methods for Different Types
-    func startAreaScreenshot(completion: @escaping (URL) -> Void) {
+    func startAreaScreenshot(completion: @escaping (Result<URL, Error>) -> Void) {
         startSnipping(type: .area, completion: completion)
     }
     
-    func startFullScreenshot(completion: @escaping (URL) -> Void) {
+    func startFullScreenshot(completion: @escaping (Result<URL, Error>) -> Void) {
         startSnipping(type: .full, completion: completion)
     }
     
-    func startWindowScreenshot(completion: @escaping (URL) -> Void) {
+    func startWindowScreenshot(completion: @escaping (Result<URL, Error>) -> Void) {
         startSnipping(type: .window, completion: completion)
+    }
+
+    func captureFullScreen() async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            startFullScreenshot { result in
+                continuation.resume(with: result)
+            }
+        }
     }
     
     // MARK: - ScreenshotApp-Style Implementation
@@ -113,12 +125,12 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
                 getImageFromPasteboard()
             } else {
                 print("❌ ScreenshotTool: screencapture failed with status: \(task.terminationStatus)")
-                finishSnipping()
+                finishSnipping(with: .failure(ScreenshotError.captureFailed))
             }
             
         } catch {
             print("❌ ScreenshotTool: Failed to run screencapture: \(error)")
-            finishSnipping()
+            finishSnipping(with: .failure(error))
         }
     }
     
@@ -128,13 +140,13 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
         
         guard NSPasteboard.general.canReadItem(withDataConformingToTypes: NSImage.imageTypes) else {
             print("❌ ScreenshotTool: No image data in pasteboard")
-            finishSnipping()
+            finishSnipping(with: .failure(ScreenshotError.noImageInPasteboard))
             return
         }
         
         guard let image = NSImage(pasteboard: NSPasteboard.general) else {
             print("❌ ScreenshotTool: Failed to create NSImage from pasteboard")
-            finishSnipping()
+            finishSnipping(with: .failure(ScreenshotError.noImageInPasteboard))
             return
         }
         
@@ -159,7 +171,7 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
               let bitmapRep = NSBitmapImageRep(data: imageData),
               let pngData = bitmapRep.representation(using: NSBitmapImageRep.FileType.png, properties: [:]) else {
             print("❌ ScreenshotTool: Failed to convert image to PNG")
-            finishSnipping()
+            finishSnipping(with: .failure(ScreenshotError.saveFailed))
             return
         }
         
@@ -167,36 +179,47 @@ class ScreenshotSnippingTool: NSObject, ObservableObject {
             try pngData.write(to: screenshotURL)
             print("✅ ScreenshotTool: Screenshot saved to: \(screenshotURL.path)")
             
-            // Execute completion callback
-            let callback = self.completion
-            self.completion = nil
-            finishSnipping()
-            
-            // Call completion on main thread
-            DispatchQueue.main.async {
-                callback?(screenshotURL)
-            }
+            finishSnipping(with: .success(screenshotURL))
             
         } catch {
             print("❌ ScreenshotTool: Failed to save image: \(error)")
-            finishSnipping()
+            finishSnipping(with: .failure(error))
         }
     }
     
     // MARK: - State Management
-    private func finishSnipping() {
+    private func finishSnipping(with result: Result<URL, Error>? = nil) {
         print("🔄 ScreenshotTool: Finishing snipping process")
-        
+
+        let callback = completion
+        completion = nil
         DispatchQueue.main.async {
             self.isSnipping = false
-            self.completion = nil
+            if let result {
+                callback?(result)
+            }
             print("✅ ScreenshotTool: Snipping process completed")
         }
     }
     
     func cancelSnipping() {
         print("❌ ScreenshotTool: Snipping cancelled")
-        finishSnipping()
+        finishSnipping(with: .failure(ScreenshotError.captureFailed))
+    }
+}
+
+extension ScreenshotSnippingTool.ScreenshotError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .captureInProgress:
+            return String(localized: "A screen capture is already in progress.")
+        case .captureFailed:
+            return String(localized: "Screen capture failed or was cancelled.")
+        case .noImageInPasteboard:
+            return String(localized: "The screen capture did not produce an image.")
+        case .saveFailed:
+            return String(localized: "The screen capture could not be saved.")
+        }
     }
 }
 

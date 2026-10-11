@@ -46,6 +46,10 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
     private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var timedTranscriptionStop: DispatchWorkItem?
+    private var automaticTranscriptionDuration: TimeInterval?
+    private var automaticTranscriptionCompletion: ((Result<String, Error>) -> Void)?
+    private var transcriptionGeneration = 0
 
     private var systemAudioStream: SCStream?
     private var systemAudioOutput: ScreenAssistantSystemAudioOutput?
@@ -65,6 +69,22 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
 
     // MARK: - Speech transcription
 
+    func transcribe(source: ScreenAssistantAudioSource, duration: TimeInterval) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            guard automaticTranscriptionCompletion == nil, !isTranscribing else {
+                continuation.resume(throwing: ScreenAssistantMediaCaptureError.captureInProgress)
+                return
+            }
+
+            transcript = ""
+            automaticTranscriptionDuration = min(max(duration, 2), 15)
+            automaticTranscriptionCompletion = { result in
+                continuation.resume(with: result)
+            }
+            toggleTranscription(source: source)
+        }
+    }
+
     func toggleTranscription(source: ScreenAssistantAudioSource) {
         if isTranscribing, activeAudioSource == source {
             stopTranscription()
@@ -75,26 +95,36 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
             stopTranscription()
         }
 
+        transcriptionGeneration += 1
+        let generation = transcriptionGeneration
         requestSpeechAuthorization { [weak self] granted in
             guard let self else { return }
+            guard self.transcriptionGeneration == generation else { return }
             guard granted else {
                 self.publishStatus(
                     String(localized: "Speech recognition permission is required."),
                     isError: true
+                )
+                self.finishAutomaticTranscription(
+                    .failure(ScreenAssistantMediaCaptureError.speechRecognitionPermissionDenied)
                 )
                 return
             }
 
             switch source {
             case .microphone:
-                self.requestMicrophoneAuthorizationAndStart()
+                self.requestMicrophoneAuthorizationAndStart(generation: generation)
             case .systemAudio:
-                self.startSystemAudioTranscription()
+                self.startSystemAudioTranscription(generation: generation)
             }
         }
     }
 
     func stopTranscription() {
+        transcriptionGeneration += 1
+        timedTranscriptionStop?.cancel()
+        timedTranscriptionStop = nil
+
         if microphoneTapInstalled {
             audioEngine.inputNode.removeTap(onBus: 0)
             microphoneTapInstalled = false
@@ -123,6 +153,11 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
                 : String(localized: "No speech was detected."),
             isError: !hadTranscript
         )
+        finishAutomaticTranscription(
+            hadTranscript
+                ? .success(transcript.trimmingCharacters(in: .whitespacesAndNewlines))
+                : .failure(ScreenAssistantMediaCaptureError.noSpeechDetected)
+        )
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self, !self.isTranscribing else { return }
@@ -148,32 +183,42 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
         }
     }
 
-    private func requestMicrophoneAuthorizationAndStart() {
+    private func requestMicrophoneAuthorizationAndStart(generation: Int) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
-            startMicrophoneTranscription()
+            startMicrophoneTranscription(generation: generation)
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 DispatchQueue.main.async {
                     guard let self else { return }
+                    guard self.transcriptionGeneration == generation else { return }
                     if granted {
-                        self.startMicrophoneTranscription()
+                        self.startMicrophoneTranscription(generation: generation)
                     } else {
                         self.publishStatus(
                             String(localized: "Microphone permission is required."),
                             isError: true
+                        )
+                        self.finishAutomaticTranscription(
+                            .failure(ScreenAssistantMediaCaptureError.microphonePermissionDenied)
                         )
                     }
                 }
             }
         case .denied, .restricted:
             publishStatus(String(localized: "Microphone permission is required."), isError: true)
+            finishAutomaticTranscription(.failure(ScreenAssistantMediaCaptureError.microphonePermissionDenied))
         @unknown default:
             publishStatus(String(localized: "Microphone permission is unavailable."), isError: true)
+            finishAutomaticTranscription(.failure(ScreenAssistantMediaCaptureError.microphonePermissionDenied))
         }
     }
 
-    private func prepareRecognition(source: ScreenAssistantAudioSource) -> SFSpeechAudioBufferRecognitionRequest? {
+    private func prepareRecognition(
+        source: ScreenAssistantAudioSource,
+        generation: Int
+    ) -> SFSpeechAudioBufferRecognitionRequest? {
+        guard transcriptionGeneration == generation else { return nil }
         recognitionTask?.cancel()
         recognitionTask = nil
         transcript = ""
@@ -181,6 +226,11 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
         let recognizer = SFSpeechRecognizer(locale: Locale.current) ?? SFSpeechRecognizer()
         guard let recognizer, recognizer.isAvailable else {
             publishStatus(String(localized: "Speech recognition is currently unavailable."), isError: true)
+            finishAutomaticTranscription(
+                .failure(ScreenAssistantMediaCaptureError.transcriptionFailed(
+                    String(localized: "Speech recognition is currently unavailable.")
+                ))
+            )
             return nil
         }
 
@@ -206,12 +256,8 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
                 if let result {
                     self.transcript = result.bestTranscription.formattedString
                     if result.isFinal {
-                        self.isTranscribing = false
-                        self.activeAudioSource = nil
-                        self.publishStatus(
-                            String(localized: "Transcription added to the message."),
-                            isError: false
-                        )
+                        self.stopTranscription()
+                        return
                     }
                 }
 
@@ -224,8 +270,8 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
         return request
     }
 
-    private func startMicrophoneTranscription() {
-        guard let request = prepareRecognition(source: .microphone) else { return }
+    private func startMicrophoneTranscription(generation: Int) {
+        guard let request = prepareRecognition(source: .microphone, generation: generation) else { return }
 
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
@@ -243,13 +289,14 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
         do {
             audioEngine.prepare()
             try audioEngine.start()
+            scheduleAutomaticTranscriptionStopIfNeeded()
         } catch {
             failTranscription(error.localizedDescription)
         }
     }
 
-    private func startSystemAudioTranscription() {
-        guard let request = prepareRecognition(source: .systemAudio) else { return }
+    private func startSystemAudioTranscription(generation: Int) {
+        guard let request = prepareRecognition(source: .systemAudio, generation: generation) else { return }
 
         Task { [weak self] in
             guard let self else { return }
@@ -258,6 +305,9 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
                     false,
                     onScreenWindowsOnly: true
                 )
+                guard await MainActor.run(body: { self.transcriptionGeneration == generation }) else {
+                    return
+                }
                 guard let display = content.displays.first else {
                     throw ScreenAssistantMediaCaptureError.noDisplay
                 }
@@ -295,10 +345,21 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
                 )
 
                 await MainActor.run {
+                    guard self.transcriptionGeneration == generation else { return }
                     self.systemAudioOutput = output
                     self.systemAudioStream = stream
                 }
+                guard await MainActor.run(body: { self.transcriptionGeneration == generation }) else {
+                    return
+                }
                 try await stream.startCapture()
+                guard await MainActor.run(body: { self.transcriptionGeneration == generation }) else {
+                    try? await stream.stopCapture()
+                    return
+                }
+                await MainActor.run {
+                    self.scheduleAutomaticTranscriptionStopIfNeeded()
+                }
             } catch {
                 await MainActor.run {
                     self.failTranscription(error.localizedDescription)
@@ -308,6 +369,9 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
     }
 
     private func failTranscription(_ message: String) {
+        transcriptionGeneration += 1
+        timedTranscriptionStop?.cancel()
+        timedTranscriptionStop = nil
         if microphoneTapInstalled {
             audioEngine.inputNode.removeTap(onBus: 0)
             microphoneTapInstalled = false
@@ -323,38 +387,84 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
         isTranscribing = false
         activeAudioSource = nil
         publishStatus(message, isError: true)
+        finishAutomaticTranscription(.failure(ScreenAssistantMediaCaptureError.transcriptionFailed(message)))
+    }
+
+    private func finishAutomaticTranscription(_ result: Result<String, Error>) {
+        timedTranscriptionStop?.cancel()
+        timedTranscriptionStop = nil
+        automaticTranscriptionDuration = nil
+        let completion = automaticTranscriptionCompletion
+        automaticTranscriptionCompletion = nil
+        completion?(result)
+    }
+
+    private func scheduleAutomaticTranscriptionStopIfNeeded() {
+        guard let duration = automaticTranscriptionDuration,
+              automaticTranscriptionCompletion != nil else { return }
+        timedTranscriptionStop?.cancel()
+        let stop = DispatchWorkItem { [weak self] in
+            self?.stopTranscription()
+        }
+        timedTranscriptionStop = stop
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: stop)
+    }
+
+    func cancelActiveCapture() {
+        guard isTranscribing || automaticTranscriptionCompletion != nil else { return }
+        failTranscription(String(localized: "Media capture was cancelled."))
     }
 
     // MARK: - Camera snapshot
 
-    func captureCameraSnapshot() {
-        guard !isCapturingCamera else { return }
+    func captureCameraSnapshot(
+        attachToAssistant: Bool = true,
+        completion: ((Result<URL, Error>) -> Void)? = nil
+    ) {
+        guard !isCapturingCamera else {
+            completion?(.failure(ScreenAssistantMediaCaptureError.captureInProgress))
+            return
+        }
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
-            takeCameraSnapshot()
+            takeCameraSnapshot(attachToAssistant: attachToAssistant, completion: completion)
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
                 DispatchQueue.main.async {
                     guard let self else { return }
                     if granted {
-                        self.takeCameraSnapshot()
+                        self.takeCameraSnapshot(attachToAssistant: attachToAssistant, completion: completion)
                     } else {
                         self.publishStatus(
                             String(localized: "Camera permission is required."),
                             isError: true
                         )
+                        completion?(.failure(ScreenAssistantMediaCaptureError.cameraPermissionDenied))
                     }
                 }
             }
         case .denied, .restricted:
             publishStatus(String(localized: "Camera permission is required."), isError: true)
+            completion?(.failure(ScreenAssistantMediaCaptureError.cameraPermissionDenied))
         @unknown default:
             publishStatus(String(localized: "Camera permission is unavailable."), isError: true)
+            completion?(.failure(ScreenAssistantMediaCaptureError.cameraPermissionDenied))
         }
     }
 
-    private func takeCameraSnapshot() {
+    func captureCameraPhoto() async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            captureCameraSnapshot(attachToAssistant: false) { result in
+                continuation.resume(with: result)
+            }
+        }
+    }
+
+    private func takeCameraSnapshot(
+        attachToAssistant: Bool,
+        completion: ((Result<URL, Error>) -> Void)?
+    ) {
         isCapturingCamera = true
         publishStatus(String(localized: "Capturing a camera photo…"), isError: false)
 
@@ -385,9 +495,11 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
 
                         switch result {
                         case .success(let data):
-                            self.saveCameraPhoto(data)
+                            let saved = self.saveCameraPhoto(data, attachToAssistant: attachToAssistant)
+                            completion?(saved)
                         case .failure(let error):
                             self.publishStatus(error.localizedDescription, isError: true)
+                            completion?(.failure(error))
                         }
                     }
                 }
@@ -400,21 +512,26 @@ final class ScreenAssistantMediaCaptureManager: NSObject, ObservableObject {
                 DispatchQueue.main.async {
                     self.isCapturingCamera = false
                     self.publishStatus(error.localizedDescription, isError: true)
+                    completion?(.failure(error))
                 }
             }
         }
     }
 
-    private func saveCameraPhoto(_ data: Data) {
+    private func saveCameraPhoto(_ data: Data, attachToAssistant: Bool) -> Result<URL, Error> {
         let fileName = "camera_\(Int(Date().timeIntervalSince1970)).jpg"
         let url = ScreenAssistantManager.screenshotDataDirectory.appendingPathComponent(fileName)
 
         do {
             try data.write(to: url, options: .atomic)
-            ScreenAssistantManager.shared.addFiles([url])
+            if attachToAssistant {
+                ScreenAssistantManager.shared.addFiles([url])
+            }
             publishStatus(String(localized: "Camera photo attached."), isError: false)
+            return .success(url)
         } catch {
             publishStatus(error.localizedDescription, isError: true)
+            return .failure(error)
         }
     }
 
@@ -473,21 +590,39 @@ private final class ScreenAssistantCameraCaptureDelegate: NSObject, AVCapturePho
 }
 
 private enum ScreenAssistantMediaCaptureError: LocalizedError {
+    case captureInProgress
     case noDisplay
     case noCamera
+    case cameraPermissionDenied
     case cameraConfigurationFailed
     case cameraEncodingFailed
+    case microphonePermissionDenied
+    case speechRecognitionPermissionDenied
+    case noSpeechDetected
+    case transcriptionFailed(String)
 
     var errorDescription: String? {
         switch self {
+        case .captureInProgress:
+            return String(localized: "Another media capture is already in progress.")
         case .noDisplay:
             return String(localized: "No display is available for system audio capture.")
         case .noCamera:
             return String(localized: "No camera is available.")
+        case .cameraPermissionDenied:
+            return String(localized: "Camera permission is required.")
         case .cameraConfigurationFailed:
             return String(localized: "The camera could not be configured.")
         case .cameraEncodingFailed:
             return String(localized: "The camera photo could not be encoded.")
+        case .microphonePermissionDenied:
+            return String(localized: "Microphone permission is required.")
+        case .speechRecognitionPermissionDenied:
+            return String(localized: "Speech recognition permission is required.")
+        case .noSpeechDetected:
+            return String(localized: "No speech was detected.")
+        case .transcriptionFailed(let message):
+            return message
         }
     }
 }

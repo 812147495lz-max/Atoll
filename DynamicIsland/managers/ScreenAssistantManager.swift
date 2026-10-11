@@ -117,10 +117,22 @@ class ScreenAssistantManager: NSObject, ObservableObject {
     @Published var recordingDuration: TimeInterval = 0
     @Published var chatMessages: [ChatMessage] = []
     @Published var isLoading: Bool = false
+    @Published var activeToolStatus: String?
     
     private var audioRecorder: AVAudioRecorder?
     private var recordingTimer: Timer?
     private var activeRequest: URLSessionTask?
+    private var toolRunContext: ToolRunContext?
+    private var includeNativeToolsInRequest = true
+    private var lastAIRequest: (message: String, files: [ScreenAssistantFile], provider: AIModelProvider)?
+
+    private struct ToolRunContext {
+        let originalMessage: String
+        let provider: AIModelProvider
+        var callCount: Int
+        var files: [ScreenAssistantFile]
+        var results: [String]
+    }
     
     // Panel management
     private var chatMessagesPanel: ChatMessagesPanel?
@@ -381,11 +393,21 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         
         // Send to appropriate AI API based on selected provider
         let provider = Defaults[.selectedAIProvider]
+        toolRunContext = ToolRunContext(
+            originalMessage: message,
+            provider: provider,
+            callCount: 0,
+            files: currentFiles,
+            results: []
+        )
+        includeNativeToolsInRequest = true
+        activeToolStatus = nil
         sendToAI(message: message, files: currentFiles, provider: provider)
     }
     
     private func sendToAI(message: String, files: [ScreenAssistantFile], provider: AIModelProvider) {
         print("🚀 ScreenAssistant: Making API request to \(provider.displayName)")
+        lastAIRequest = (message, files, provider)
         isLoading = true
         
         switch provider {
@@ -584,6 +606,9 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         ])
         
         var requestBody: [String: Any] = [
+            "systemInstruction": [
+                "parts": [["text": ScreenAssistantToolCalling.systemPrompt]]
+            ],
             "contents": contents,
             "generationConfig": [
                 "temperature": 0.7,
@@ -611,6 +636,11 @@ class ScreenAssistantManager: NSObject, ObservableObject {
                 ]
             ]
         ]
+        if includeNativeToolsInRequest {
+            requestBody["tools"] = [[
+                "functionDeclarations": ScreenAssistantToolCalling.geminiFunctionDeclarations
+            ]]
+        }
         
         // Add thinking configuration if enabled and model supports it
         let selectedModel = Defaults[.selectedAIModel]
@@ -626,7 +656,10 @@ class ScreenAssistantManager: NSObject, ObservableObject {
     }
     
     private func buildOpenAIRequestBody(message: String, files: [ScreenAssistantFile], model: String) -> [String: Any] {
-        var messages: [[String: Any]] = []
+        var messages: [[String: Any]] = [[
+            "role": "system",
+            "content": ScreenAssistantToolCalling.systemPrompt
+        ]]
         
         // Add previous conversation messages (last 10 for context)
         let recentMessages = Array(chatMessages.suffix(10))
@@ -642,17 +675,30 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         
         // Add current message
         let contextualMessage = buildContextualMessage(message: message, files: files)
+        var content: [[String: Any]] = [["type": "text", "text": contextualMessage]]
+        for file in files where file.type == .image {
+            guard let image = customImageData(for: file) else { continue }
+            content.append([
+                "type": "image_url",
+                "image_url": ["url": "data:\(image.mimeType);base64,\(image.base64)"]
+            ])
+        }
         messages.append([
             "role": "user",
-            "content": contextualMessage
+            "content": content.count == 1 ? contextualMessage : content
         ])
         
-        return [
+        var requestBody: [String: Any] = [
             "model": model,
             "messages": messages,
             "temperature": 0.7,
             "max_tokens": 2048
         ]
+        if includeNativeToolsInRequest {
+            requestBody["tools"] = ScreenAssistantToolCalling.openAITools
+            requestBody["tool_choice"] = "auto"
+        }
+        return requestBody
     }
     
     private func buildClaudeRequestBody(message: String, files: [ScreenAssistantFile], model: String) -> [String: Any] {
@@ -672,32 +718,61 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         
         // Add current message
         let contextualMessage = buildContextualMessage(message: message, files: files)
-        messages.append([
-            "role": "user",
-            "content": contextualMessage
-        ])
+        var content: [[String: Any]] = [["type": "text", "text": contextualMessage]]
+        for file in files where file.type == .image {
+            guard let image = customImageData(for: file) else { continue }
+            content.append([
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": image.mimeType,
+                    "data": image.base64
+                ]
+            ])
+        }
+        messages.append(["role": "user", "content": content])
         
-        return [
+        var requestBody: [String: Any] = [
             "model": model,
+            "system": ScreenAssistantToolCalling.systemPrompt,
             "max_tokens": 2048,
             "messages": messages
         ]
+        if includeNativeToolsInRequest {
+            requestBody["tools"] = ScreenAssistantToolCalling.anthropicTools
+            requestBody["tool_choice"] = ["type": "auto"]
+        }
+        return requestBody
     }
     
     private func buildOllamaRequestBody(message: String, files: [ScreenAssistantFile]) -> [String: Any] {
         let selectedModel = Defaults[.selectedAIModel] ?? AIModel(id: "llama3.2", name: "Llama 3.2", supportsThinking: false)
         let contextualMessage = buildContextualMessage(message: message, files: files)
         
-        return [
+        var userMessage: [String: Any] = [
+            "role": "user",
+            "content": contextualMessage
+        ]
+        let images = files.compactMap { customImageData(for: $0)?.base64 }
+        if !images.isEmpty {
+            userMessage["images"] = images
+        }
+
+        var requestBody: [String: Any] = [
             "model": selectedModel.id,
             "messages": [
                 [
-                    "role": "user",
-                    "content": contextualMessage
-                ]
+                    "role": "system",
+                    "content": ScreenAssistantToolCalling.systemPrompt
+                ],
+                userMessage
             ],
             "stream": false
         ]
+        if includeNativeToolsInRequest {
+            requestBody["tools"] = ScreenAssistantToolCalling.openAITools
+        }
+        return requestBody
     }
 
     private func buildCustomAPIRequestBody(
@@ -719,6 +794,10 @@ class ScreenAssistantManager: NSObject, ObservableObject {
 
     private func buildCustomOpenAIRequestBody(message: String, files: [ScreenAssistantFile], model: String) -> [String: Any] {
         var messages = customConversationHistory(assistantRole: "assistant")
+        messages.insert([
+            "role": "system",
+            "content": ScreenAssistantToolCalling.systemPrompt
+        ], at: 0)
         let textContent = buildContextualMessage(message: message, files: files) + customTextFileContents(files)
         var content: [[String: Any]] = [[
             "type": "text",
@@ -738,12 +817,17 @@ class ScreenAssistantManager: NSObject, ObservableObject {
             messages.append(["role": "user", "content": content])
         }
 
-        return [
+        var requestBody: [String: Any] = [
             "model": model,
             "messages": messages,
             "temperature": 0.7,
             "max_tokens": 2048
         ]
+        if includeNativeToolsInRequest {
+            requestBody["tools"] = ScreenAssistantToolCalling.openAITools
+            requestBody["tool_choice"] = "auto"
+        }
+        return requestBody
     }
 
     private func buildCustomAnthropicRequestBody(message: String, files: [ScreenAssistantFile], model: String) -> [String: Any] {
@@ -766,11 +850,17 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         }
         messages.append(["role": "user", "content": content])
 
-        return [
+        var requestBody: [String: Any] = [
             "model": model,
+            "system": ScreenAssistantToolCalling.systemPrompt,
             "max_tokens": 2048,
             "messages": messages
         ]
+        if includeNativeToolsInRequest {
+            requestBody["tools"] = ScreenAssistantToolCalling.anthropicTools
+            requestBody["tool_choice"] = ["type": "auto"]
+        }
+        return requestBody
     }
 
     private func buildCustomOllamaRequestBody(message: String, files: [ScreenAssistantFile], model: String) -> [String: Any] {
@@ -784,8 +874,20 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         }
 
         var messages = customConversationHistory(assistantRole: "assistant")
+        messages.insert([
+            "role": "system",
+            "content": ScreenAssistantToolCalling.systemPrompt
+        ], at: 0)
         messages.append(userMessage)
-        return ["model": model, "messages": messages, "stream": false]
+        var requestBody: [String: Any] = [
+            "model": model,
+            "messages": messages,
+            "stream": false
+        ]
+        if includeNativeToolsInRequest {
+            requestBody["tools"] = ScreenAssistantToolCalling.openAITools
+        }
+        return requestBody
     }
 
     private func customConversationHistory(assistantRole: String) -> [[String: Any]] {
@@ -986,6 +1088,15 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         if let httpResponse = response as? HTTPURLResponse {
             print("📊 ScreenAssistant: HTTP Status: \(httpResponse.statusCode)")
             if !(200..<300).contains(httpResponse.statusCode) {
+                if [400, 422].contains(httpResponse.statusCode),
+                   includeNativeToolsInRequest,
+                   toolRunContext != nil,
+                   let retry = lastAIRequest {
+                    print("ℹ️ ScreenAssistant: API rejected native tools; retrying with text tool protocol")
+                    includeNativeToolsInRequest = false
+                    sendToAI(message: retry.message, files: retry.files, provider: retry.provider)
+                    return
+                }
                 if provider == .custom, let data {
                     handleCustomAPIError(statusCode: httpResponse.statusCode, data: data)
                 } else {
@@ -1002,6 +1113,21 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         }
         
         print("📨 ScreenAssistant: Response data size: \(data.count) bytes")
+
+        if let parsed = ScreenAssistantToolCalling.parseResponse(
+            data: data,
+            provider: provider,
+            customFormat: Defaults[.customAPIFormat]
+        ) {
+            if let tool = parsed.tool {
+                executeToolRequest(tool, provider: provider)
+                return
+            }
+            if let text = parsed.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                addAssistantMessage(text)
+                return
+            }
+        }
         
         // Parse response based on provider
         switch provider {
@@ -1377,6 +1503,10 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         // Cancel any in-flight request
         activeRequest?.cancel()
         activeRequest = nil
+        toolRunContext = nil
+        activeToolStatus = nil
+        lastAIRequest = nil
+        ScreenAssistantMediaCaptureManager.shared.cancelActiveCapture()
         
         isLoading = false
         chatMessages.removeAll()
@@ -1385,8 +1515,67 @@ class ScreenAssistantManager: NSObject, ObservableObject {
     
     private func addAssistantMessage(_ content: String) {
         print("💬 ScreenAssistant: Adding assistant message: \(content.prefix(100))...")
+        toolRunContext = nil
+        activeToolStatus = nil
+        lastAIRequest = nil
+        isLoading = false
         let assistantMessage = ChatMessage(content: content, isFromUser: false)
         chatMessages.append(assistantMessage)
+    }
+
+    private func executeToolRequest(_ request: ScreenAssistantToolRequest, provider: AIModelProvider) {
+        guard var context = toolRunContext, context.provider == provider else {
+            addAssistantMessage("The AI requested device context, but the original request is no longer active.")
+            return
+        }
+        guard context.callCount < ScreenAssistantToolCalling.maximumCallsPerUserMessage else {
+            addAssistantMessage("The AI reached the device-tool limit for this message. Please send a new request to continue.")
+            return
+        }
+
+        context.callCount += 1
+        toolRunContext = context
+        activeToolStatus = request.tool.statusText
+        isLoading = true
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await ScreenAssistantToolCalling.execute(request)
+                guard var activeContext = self.toolRunContext,
+                      activeContext.provider == provider else { return }
+                activeContext.files.append(contentsOf: result.files)
+                activeContext.results.append(result.summary)
+                self.toolRunContext = activeContext
+                self.activeToolStatus = nil
+                self.sendToolResultToAI(activeContext)
+            } catch {
+                guard var activeContext = self.toolRunContext,
+                      activeContext.provider == provider else { return }
+                activeContext.results.append(
+                    "Tool \(request.tool.rawValue) failed: \(error.localizedDescription)"
+                )
+                self.toolRunContext = activeContext
+                self.activeToolStatus = nil
+                self.sendToolResultToAI(activeContext)
+            }
+        }
+    }
+
+    private func sendToolResultToAI(_ context: ToolRunContext) {
+        let results = context.results.map { "- \($0)" }.joined(separator: "\n")
+        let followUp = """
+        Continue the user's original request using the Atoll device-tool results below.
+
+        Original request:
+        \(context.originalMessage)
+
+        Tool results:
+        \(results)
+
+        Any attached image is direct output from the requested device tool. If another device tool is truly needed, request it now; otherwise answer the original request directly. Do not ask the user to manually upload the same context.
+        """
+        sendToAI(message: followUp, files: context.files, provider: context.provider)
     }
     
     private func handleAPIError(statusCode: Int, provider: AIModelProvider) {
